@@ -34,14 +34,16 @@ flowchart LR
 
 **依赖关系**: #1 的 cookie 机制是 #2 的前置；#3 相对独立可并行。
 
-## P1 — 安全加固（对外暴露前必须完成）
+## P1 — 安全加固（对外暴露前必须完成）✅ 已完成 (2026-09-04)
 
 当前默认 no-auth + CORS 全放行，仅适合内网信任环境。
 
 | # | 任务 | 内容 | 验收标准 |
 |---|---|---|---|
-| 4 | API Key middleware | `API_KEY` env var → 校验 `X-API-Key` header；未设置 env 时保持 no-auth（向后兼容） | 无 key 返回 401；带合法 key 正常；env 未配置时行为不变 |
-| 5 | CORS 收紧 | origin 白名单改为配置化（env var / 配置文件），默认收紧为显式列表 | 未配置 origin 的跨域请求被拒 |
+| 4 | ~~API Key middleware~~ ✅ | `API_KEY` env var → 校验 `X-API-Key` header；未设置 env 时保持 no-auth（向后兼容） | 无 key 返回 401；带合法 key 正常；env 未配置时行为不变 |
+| 5 | ~~CORS 收紧~~ ✅ | origin 白名单改为配置化（`CORS_ALLOW_ORIGINS` env var，逗号分隔），默认空列表 = 跨域全拒 | 未配置 origin 的跨域请求被拒 |
+
+实现: `multimedia_parsing/security.py` + `server.create_app()`；测试 `tests/test_server_security.py`。
 
 ## P2 — 规模化（scaling 时再做）
 

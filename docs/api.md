@@ -19,9 +19,26 @@
 
 | 状态码 | 场景 |
 |---|---|
+| `401` | `API_KEY` env 已配置但请求缺 `X-API-Key` header 或值不对（未配置 env 时无此错误） |
 | `409` | `batch_id` 已存在 |
 | `404` | batch 不存在（cancel / events） |
 | `422` | 字段校验失败（extra=forbid，多余字段也会 422） |
+
+---
+
+## 认证与 CORS（P1 安全配置）
+
+均通过环境变量配置，`create_app()` 构造时读取：
+
+| env var | 默认 | 行为 |
+|---|---|---|
+| `API_KEY` | 未设置（no-auth） | 设置后所有端点（除 `/health` `/docs` `/redoc` `/openapi.json`）要求请求头 `X-API-Key: <key>`，否则 401 |
+| `CORS_ALLOW_ORIGINS` | 空列表（跨域全拒） | 逗号分隔 origin 白名单，如 `https://app.example.com,https://admin.example.com`；显式 `*` = 全放行 |
+
+```bash
+# 配置了 API_KEY 的调用示例
+curl -H "X-API-Key: your-key" http://127.0.0.1:8765/batches
+```
 
 ---
 

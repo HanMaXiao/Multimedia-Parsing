@@ -152,9 +152,8 @@ flowchart LR
 
 ## Security
 
-- **no-auth by default** (内网服务, 信任调用方)
-- 后续可加 API key middleware: `API_KEY=xxx` env var → 校验 `X-API-Key` header
-- **CORS**: 允许所有 origin (内网) — 生产环境收紧
+- **auth（P1 #4 已落地）**: `API_KEY` env var → 校验 `X-API-Key` header（401）；未设置 env 时保持 no-auth（向后兼容）。`/health` `/docs` `/redoc` `/openapi.json` 免认证。实现 `multimedia_parsing/security.py`
+- **CORS（P1 #5 已落地）**: `CORS_ALLOW_ORIGINS` env var（逗号分隔白名单）；默认空列表 = 跨域全拒；显式 `*` 恢复全放行。见 `server.create_app()`
 - **rate limit**: 待定 (先 functional, 不加限流)
 - **input validation**: Pydantic 严格 mode (extra=forbid) 防止恶意 manifest
 
@@ -206,7 +205,13 @@ flowchart LR
   不能跨进程共享 batch 状态。后续如需多 worker,改用 Redis pub/sub
 - **OSS 配置**: 走 env var 临时传 (Plan D6 storage settings),没持久化
 - **playwright**: 需要装 chromium (`playwright install chromium`),不在默认依赖
+  - CentOS 7 (glibc 2.17) 部署: playwright>=1.40 的内置 node 跑不起来,
+    需 pin `playwright==1.30.0`（生产机 venv 已如此配置）
 - **单 batch 单 stage**: 一个 batch_id 只对应一个 stage (parse 或 fetch),不混合
+- **parse 阶段无 cookie 注入**: `/fetch` 支持 `cookie_file`,但 `/parse` 不支持
+  batch 级 cookie — 数据中心 IP 会被 B站 412 反爬拦（已在 47.99.38.96 部署验证）
+- **大陆网络限制**: YouTube 等站点从大陆服务器不可达,需给服务配 `HTTPS_PROXY`
+  （47.99.38.96 实测）
 - **9 状态 vs SSE**: SSE event payload 沿用原 project 的 resource_fetch_status type
   (前端兼容,跟 Rust emit 协议一致)
 
