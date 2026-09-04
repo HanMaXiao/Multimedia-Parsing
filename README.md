@@ -124,4 +124,4 @@ python scripts/smoke_e2e.py
 
 ## License
 
-Proprietary.
+MIT © 2026 HanMaXiao. See [LICENSE](LICENSE) for details.
