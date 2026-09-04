@@ -1,12 +1,14 @@
 """test_xiaohongshu_resolver — XiaohongshuResolver F0.1 智能 dispatch 测试.
 
-Phase 7+ (2026-09-04) 修复:
-  - xhs #1 (6a727c8d) 是图集, 之前被 VideoResolver 吞错返 [], 错误标 skipped
-  - xhs #2 (6a769354) 是视频, 之前能正常 parse
-  - 改后: XiaohongshuResolver 调 yt-dlp 拿 note_info, 判 video / image, dispatch
+Phase 7+ (2026-09-04) 设计:
+  - 旧实现: 调 yt-dlp 内部 API 拿 note_info, 判 video.stream / imageList, dispatch
+  - 新实现 (2026-09-04 修订): video-first fallback — VideoResolver.parse 拿到 video
+    formats 就返 video items; 失败 → 兜底 ImageResolver.parse 拿 imageList
   - 图片解析下载由 image_fetcher 负责 (用户约束)
+  - 简化原因: 新版 yt-dlp 顶层 extract_info 不暴露 note_info,旧路径不稳
 
-测试用 monkeypatch 替换 _fetch_xhs_note_info (避免真 xhs 网络), 验证 dispatch 逻辑.
+测试用 monkeypatch 替换 VideoResolver.parse / ImageResolver.parse, 验证 dispatch 逻辑,
+不打真 xhs 网络.
 """
 from __future__ import annotations
 
@@ -22,168 +24,131 @@ from multimedia_parsing.resource_fetcher.base import (
 )
 from multimedia_parsing.resource_fetcher.resolvers.xiaohongshu import (
     XiaohongshuResolver,
-    _fetch_xhs_note_info,
 )
 
 
 # ---------------------------------------------------------------------------
-# F0.1 dispatch 测试 (mock _fetch_xhs_note_info, 不打真 xhs 网络)
+# F0.1 dispatch 测试 (mock video/image resolver, 不打真 xhs 网络)
 # ---------------------------------------------------------------------------
 
-class _FakeVideoItem:
-    """fake video_fetcher.ResolvedVideo for VideoResolver monkeypatch."""
-    def __init__(self, platform, video_id, title, duration=None, extractor="BiliBili"):
-        self.platform = platform
-        self.video_id = video_id
-        self.title = title
-        self.duration = duration
-        self.extractor = extractor
 
-
-def test_parse_image_only_note_dispatches_to_image_resolver():
-    """xhs #1 (6a727c8d) — note 只有 imageList → 调 ImageResolver.parse, 产 N 个 image items."""
-    # mock note_info: 只有 imageList (无 video.media.stream)
-    fake_note_info = {
-        "imageList": [
-            {"urlDefault": "https://sns-img.xhscdn.com/img1.jpg"},
-            {"urlDefault": "https://sns-img.xhscdn.com/img2.jpg"},
-            {"urlDefault": "https://sns-img.xhscdn.com/img3.jpg"},
-        ],
-    }
-
-    with patch(
-        "multimedia_parsing.resource_fetcher.resolvers.xiaohongshu._fetch_xhs_note_info",
-        return_value=fake_note_info,
-    ):
-        # mock ImageResolver.parse 返 3 个 image items
-        fake_image_items = [
-            ResourceItem(
-                item_id=f"xhs_img_{i}",
-                resource_type="image",
-                platform="xiaohongshu",
-                source_url="https://www.xiaohongshu.com/explore/test",
-                meta={"image_url": f"https://xhs.com/img{i}.jpg"},
-            )
-            for i in range(3)
-        ]
-        with patch.object(
-            XiaohongshuResolver,
-            "_image_resolver",
-            new_callable=_make_mock_image_resolver,
-        ) if False else patch(
-            "multimedia_parsing.resource_fetcher.resolvers.image.ImageResolver.parse",
-            return_value=fake_image_items,
-        ):
-            r = XiaohongshuResolver()
-            items = r.parse("https://www.xiaohongshu.com/explore/test")
-    # F0.1 终判: 3 image items, resource_type=image
-    assert len(items) == 3
-    assert all(it.resource_type == "image" for it in items)
-    assert [it.item_id for it in items] == ["xhs_img_0", "xhs_img_1", "xhs_img_2"]
-
-
-def test_parse_video_only_note_dispatches_to_video_resolver():
-    """xhs #2 (6a769354) — note 只有 video.media.stream → 调 VideoResolver.parse, 产 1 个 video item."""
-    fake_note_info = {
-        "video": {
-            "media": {
-                "stream": {
-                    "h264": {"master_url": "https://sns-video.xhscdn.com/stream.m3u8"},
-                }
-            }
-        }
-    }
-
+def test_parse_video_first_returns_video_items():
+    """xhs video URL — VideoResolver.parse 返 1 video item, 不调 image 兜底."""
     fake_video_items = [
         ResourceItem(
             item_id="xhs_video_001",
             resource_type="video",
             platform="xiaohongshu",
             source_url="https://www.xiaohongshu.com/explore/test",
-            title="一代版本一代神",
+            title="社死现场",
+            meta={"video_id": "6a6fa5f4", "duration": 98.3},
         )
     ]
     with patch(
-        "multimedia_parsing.resource_fetcher.resolvers.xiaohongshu._fetch_xhs_note_info",
-        return_value=fake_note_info,
-    ):
+        "multimedia_parsing.resource_fetcher.resolvers.video.VideoResolver.parse",
+        return_value=fake_video_items,
+    ) as mock_video:
         with patch(
-            "multimedia_parsing.resource_fetcher.resolvers.video.VideoResolver.parse",
-            return_value=fake_video_items,
-        ):
+            "multimedia_parsing.resource_fetcher.resolvers.image.ImageResolver.parse",
+        ) as mock_image:
             r = XiaohongshuResolver()
             items = r.parse("https://www.xiaohongshu.com/explore/test")
     assert len(items) == 1
     assert items[0].resource_type == "video"
-    assert items[0].title == "一代版本一代神"
-
-
-def test_parse_mixed_video_and_image_prefers_video():
-    """note 既有 video stream 又有 imageList → 优先 video (罕见 case, xhs 视频 + 封面图)."""
-    fake_note_info = {
-        "video": {"media": {"stream": {"h264": {"master_url": "x"}}}},
-        "imageList": [{"urlDefault": "https://cover.jpg"}],
-    }
-    fake_items = [
-        ResourceItem(item_id="v1", resource_type="video", platform="xiaohongshu",
-                     source_url="u", title="video+cover")
-    ]
-    with patch(
-        "multimedia_parsing.resource_fetcher.resolvers.xiaohongshu._fetch_xhs_note_info",
-        return_value=fake_note_info,
-    ):
-        with patch(
-            "multimedia_parsing.resource_fetcher.resolvers.video.VideoResolver.parse",
-            return_value=fake_items,
-        ) as mock_video:
-            with patch(
-                "multimedia_parsing.resource_fetcher.resolvers.image.ImageResolver.parse",
-            ) as mock_image:
-                r = XiaohongshuResolver()
-                items = r.parse("https://xhs.com/test")
-    assert len(items) == 1
-    assert items[0].resource_type == "video"
+    assert items[0].title == "社死现场"
     mock_video.assert_called_once()
     mock_image.assert_not_called()
 
 
-def test_parse_note_info_unavailable_falls_back_to_image_resolver():
-    """note_info 拿不到 (token 失效 / 网络) → 兜底 ImageResolver (gallery-dl 也能直接处理 xhs URL)."""
+def test_parse_video_fails_falls_back_to_image_items():
+    """xhs image URL — VideoResolver.parse 返 [] → 兜底 ImageResolver.parse 返 N image items."""
+    fake_image_items = [
+        ResourceItem(
+            item_id=f"xhs_img_{i}",
+            resource_type="image",
+            platform="xiaohongshu",
+            source_url="https://www.xiaohongshu.com/explore/test",
+            meta={"image_url": f"https://xhs.com/img{i}.jpg"},
+        )
+        for i in range(3)
+    ]
     with patch(
-        "multimedia_parsing.resource_fetcher.resolvers.xiaohongshu._fetch_xhs_note_info",
-        return_value=None,
-    ):
-        fake_items = [
-            ResourceItem(item_id="fb1", resource_type="image", platform="xiaohongshu",
-                         source_url="u", meta={"image_url": "x"})
-        ]
+        "multimedia_parsing.resource_fetcher.resolvers.video.VideoResolver.parse",
+        return_value=[],  # xhs 图集无 video formats → yt-dlp 抛 DownloadError → 吞掉返 []
+    ) as mock_video:
         with patch(
             "multimedia_parsing.resource_fetcher.resolvers.image.ImageResolver.parse",
-            return_value=fake_items,
+            return_value=fake_image_items,
         ) as mock_image:
             r = XiaohongshuResolver()
             items = r.parse("https://www.xiaohongshu.com/explore/test")
-    # 兜底走 image resolver
-    assert len(items) == 1
-    assert items[0].resource_type == "image"
+    assert len(items) == 3
+    assert all(it.resource_type == "image" for it in items)
+    assert [it.item_id for it in items] == ["xhs_img_0", "xhs_img_1", "xhs_img_2"]
+    mock_video.assert_called_once()
     mock_image.assert_called_once()
 
 
-def test_parse_empty_note_falls_back_to_image_resolver():
-    """note 存在但既无 video stream 也无 imageList → 兜底 image."""
-    fake_note_info = {"type": "video", "title": "Empty note"}  # 无 video.media.stream 也无 imageList
+def test_parse_video_raises_falls_back_to_image():
+    """video resolver 抛异常 (网络 / 反爬) → 兜底 image (跟 _fetch_xhs_note_info 失败行为同)."""
+    fake_image_items = [
+        ResourceItem(item_id="fb1", resource_type="image", platform="xiaohongshu",
+                     source_url="u", meta={"image_url": "x"})
+    ]
     with patch(
-        "multimedia_parsing.resource_fetcher.resolvers.xiaohongshu._fetch_xhs_note_info",
-        return_value=fake_note_info,
-    ):
+        "multimedia_parsing.resource_fetcher.resolvers.video.VideoResolver.parse",
+        side_effect=RuntimeError("network error"),
+    ) as mock_video:
+        with patch(
+            "multimedia_parsing.resource_fetcher.resolvers.image.ImageResolver.parse",
+            return_value=fake_image_items,
+        ) as mock_image:
+            r = XiaohongshuResolver()
+            items = r.parse("https://www.xiaohongshu.com/explore/test")
+    assert len(items) == 1
+    assert items[0].resource_type == "image"
+    mock_video.assert_called_once()
+    mock_image.assert_called_once()
+
+
+def test_parse_both_resolvers_fail_returns_empty():
+    """video + image resolver 都失败 (极端: xhs 完全不可达) → 返 []."""
+    with patch(
+        "multimedia_parsing.resource_fetcher.resolvers.video.VideoResolver.parse",
+        return_value=[],
+    ) as mock_video:
         with patch(
             "multimedia_parsing.resource_fetcher.resolvers.image.ImageResolver.parse",
             return_value=[],
         ) as mock_image:
             r = XiaohongshuResolver()
-            items = r.parse("https://xhs.com/test")
+            items = r.parse("https://www.xiaohongshu.com/explore/test")
     assert items == []
+    mock_video.assert_called_once()
     mock_image.assert_called_once()
+
+
+def test_parse_image_raises_returns_empty():
+    """video 拿到, image 抛 (不太可能但兜底) → 返 video items."""
+    fake_video_items = [
+        ResourceItem(item_id="v1", resource_type="video", platform="xiaohongshu",
+                     source_url="u", title="mixed case")
+    ]
+    with patch(
+        "multimedia_parsing.resource_fetcher.resolvers.video.VideoResolver.parse",
+        return_value=fake_video_items,
+    ) as mock_video:
+        with patch(
+            "multimedia_parsing.resource_fetcher.resolvers.image.ImageResolver.parse",
+            side_effect=RuntimeError("should not be called"),
+        ) as mock_image:
+            r = XiaohongshuResolver()
+            items = r.parse("https://xhs.com/test")
+    # video 拿到就直接返, 不调 image
+    assert len(items) == 1
+    assert items[0].resource_type == "video"
+    mock_video.assert_called_once()
+    mock_image.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +217,3 @@ def test_router_xiaohongshu_uses_mixed_resolver():
     assert resolve("https://www.xiaohongshu.com/explore/abc") is XiaohongshuResolver
     assert resolve("https://www.xiaohongshu.com/discovery/item/xyz") is XiaohongshuResolver
     assert resolve("https://xhslink.com/a/abc") is XiaohongshuResolver
-
-
-# ---------------------------------------------------------------------------
-# placeholder (avoid lint warning "imported but unused" if _make_mock_image_resolver False branch)
-# ---------------------------------------------------------------------------
-def _make_mock_image_resolver():
-    return None

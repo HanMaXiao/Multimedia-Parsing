@@ -238,12 +238,11 @@ def _run_parse_in_thread(batch_id: str, manifest: ResourceParseManifest) -> None
         _enqueue_event(batch_id, None)  # None = 终止 sentinel
 
 
-def _run_fetch_in_thread(batch_id: str, manifest: ResourceFetchManifest, dest: FetchDestination) -> None:
+def _run_fetch_in_thread(batch_id: str, manifest: ResourceFetchManifest) -> None:
     cancel_event = _batch_cancel_events[batch_id]
     try:
         results = run_fetch(
             manifest,
-            dest=dest,
             event_cb=_build_sync_event_cb(batch_id),
             cancel_event=cancel_event,
         )
@@ -417,7 +416,7 @@ async def start_fetch(req: FetchRequest) -> FetchResponse:
     }
     t = threading.Thread(
         target=_run_fetch_in_thread,
-        args=(batch_id, manifest, dest),
+        args=(batch_id, manifest),
         name=f"fetch-{batch_id}",
         daemon=True,
     )

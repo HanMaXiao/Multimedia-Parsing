@@ -27,7 +27,12 @@ from .resolvers.video import VideoResolver
 # ---------------------------------------------------------------------------
 
 
-def _select_resolver_for_resource_type(resource_type: str) -> Optional[Any]:
+def _select_resolver_for_resource_type(
+    resource_type: str,
+    *,
+    cookie_file=None,
+    account_id=None,
+) -> Optional[Any]:
     """按 item.resource_type 选 resolver instance.
 
     返回带 batch-level context (cookie_file / account_id) 的 resolver. cookie_file 来自
@@ -36,12 +41,7 @@ def _select_resolver_for_resource_type(resource_type: str) -> Optional[Any]:
     Returns:
         Resolver instance (VideoResolver / ImageResolver) 或 None (audio / model D2 预留).
     """
-    # 解析器由 caller 注入 cookie_file — 本期 run_fetch 是 orchestration 入口,
-    # 需要把 manifest.cookie_file / account_id 传给 resolver. 实际解法:
-    # _select_resolver_for_resource_type 接受可选 batch_ctx 参数, 由 run_fetch 传入.
-    # 但为了 monkeypatch 简单,这里用 None 兜底, runner 在调用前已注入.
-    # 真批量接 cookie_file 的逻辑在 orchestration 主循环里.
-    return _make_resolver(resource_type, cookie_file=None, account_id=None)
+    return _make_resolver(resource_type, cookie_file=cookie_file, account_id=account_id)
 
 
 def _make_resolver(resource_type: str, *, cookie_file=None, account_id=None) -> Optional[Any]:
@@ -111,7 +111,43 @@ def run_fetch(
         长度 = len(manifest.items);顺序与 items 一致. 每条带 success / failed 终态.
     """
     if resolver_factory is None:
-        resolver_factory = _select_resolver_for_resource_type
+        # 默认 factory: 走 _select_resolver_for_resource_type 并传 manifest cookie_file / account_id
+        # (monkeypatch 替换 _select_resolver_for_resource_type 时也能接收这两个参数)
+        def _default_factory_with_ctx(resource_type: str):
+            return _select_resolver_for_resource_type(resource_type)
+
+        def _default_factory_with_ctx_kt(resource_type: str):
+            # 支持新签名 (cookie_file, account_id kwarg) — 默认 _select_resolver_for_resource_type
+            return _select_resolver_for_resource_type(
+                resource_type,
+                cookie_file=manifest.cookie_file,
+                account_id=manifest.account_id,
+            )
+
+        # monkeypatch 替换 _select_resolver_for_resource_type 为 lambda(rt) 时,
+        # _kt 版本会 TypeError. 优先调 _kt,失败回退 _default.
+        def _safe_default(resource_type: str):
+            try:
+                return _default_factory_with_ctx_kt(resource_type)
+            except TypeError:
+                return _default_factory_with_ctx(resource_type)
+
+        resolver_factory = _safe_default
+
+    def _call_factory(rt: str):
+        """兼容新旧 factory 签名 — 老 factory (rt) → 新 factory (rt, *, cookie_file, account_id).
+
+        同事测试用 lambda rt: ... 不接 kwarg,这里 try/except 兜底.
+        """
+        try:
+            return resolver_factory(
+                rt,
+                cookie_file=manifest.cookie_file,
+                account_id=manifest.account_id,
+            )
+        except TypeError:
+            # 旧签名: factory(rt)
+            return resolver_factory(rt)
 
     dest = FetchDestination(
         mode=manifest.mode,
@@ -126,7 +162,7 @@ def run_fetch(
             break
 
         # 2) 选 resolver — 按 item.resource_type
-        resolver = resolver_factory(item.resource_type)
+        resolver = _call_factory(item.resource_type)
         if resolver is None:
             _emit(
                 event_cb,

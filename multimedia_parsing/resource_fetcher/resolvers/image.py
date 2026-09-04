@@ -149,7 +149,18 @@ class ImageResolver:
                 error=f"download: {dl.error}",
             )
 
+        # 避免 item 间覆盖: 同 image_url 多次 fetch (e.g. xhs1 + xhs2 共享 picasso-static.png)
+        # 会用 base_name 写同一文件,后写覆盖前写. 用 item_id 短串重命名为唯一文件名.
         local_path = dl.file_path
+        if local_path and local_path.exists():
+            suffix = local_path.suffix  # 保留 .jpg / .png / .webp
+            new_path = out_dir / f"{item.item_id}{suffix}"
+            if new_path != local_path:
+                # 同 item_id 重跑覆盖允许 (幂等), 不同 item 重命名隔离
+                if new_path.exists():
+                    new_path.unlink()
+                local_path.rename(new_path)
+                local_path = new_path
         # 2) local 模式 — 直接 success
         if dest.mode == "local":
             return FetchResult(
