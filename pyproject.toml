@@ -1,0 +1,84 @@
+[project]
+name = "multimedia-parsing"
+version = "0.1.0"
+description = "Universal multimedia resource parsing service — video / image / (audio, model) smart URL routing + 3-mode download (local / oss / both) with SSE event stream"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [
+  { name = "Multi-Platform Auto-Publish Team" },
+]
+keywords = ["multimedia", "video", "image", "parsing", "fastapi", "sse", "yt-dlp", "gallery-dl", "oss"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: Multimedia :: Video",
+  "Topic :: Multimedia :: Graphics",
+]
+
+# 核心 HTTP / SSE 服务栈
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "sse-starlette>=2.0",  # SSE 响应封装
+  "pydantic>=2.5",       # FastAPI 内置
+]
+
+[project.optional-dependencies]
+# 资源解析依赖 — opt-in 装,避免默认装 yt-dlp / playwright 这种重依赖
+# 装法: pip install -e .[parsing]
+parsing = [
+  # 视频 (yt-dlp 1000+ 站点支持)
+  "yt-dlp>=2024.8.6",
+  # 图片 (gallery-dl 1000+ 站点 + BS4 fallback)
+  "gallery-dl>=1.27",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.0",         # BS4 加速
+  "Pillow>=10.0",      # 图片转换 / 压缩
+  # JS 渲染 (image_fetcher 兜底, 弱网 / 复杂 SPA)
+  "playwright>=1.40",
+  # OSS 上传 (boto3 兼容 AWS S3 / 阿里 OSS / 腾讯 COS / R2 / MinIO)
+  "boto3>=1.34",
+  "imageio-ffmpeg>=0.5",  # B 站 / YouTube 合并流需要
+]
+
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "httpx>=0.27",         # FastAPI TestClient
+  # 安装 playwright 浏览器 (image_fetcher.playwright 路径需要)
+  # 装法: playwright install chromium
+]
+
+[project.scripts]
+# 启动 server: multimedia-parsing-server --host 0.0.0.0 --port 8765
+multimedia-parsing-server = "multimedia_parsing.server:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["multimedia_parsing*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+# Mirrors 原项目 pytest 配置
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+  "unit: pure logic unit tests (no I/O, no Mock)",
+  "integration: Mock integration tests (with module mocks)",
+  "slow: tests that take >2s (skip in daily dev)",
+]
