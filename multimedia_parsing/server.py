@@ -27,7 +27,8 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import APIRouter, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -46,6 +47,7 @@ from .resource_fetcher.manifest import (
 from .resource_fetcher.run_fetch import run_fetch
 from .resource_fetcher.run_parse import run_parse
 from .oss.oss_uploader import OssConfig
+from .security import APIKeyMiddleware, load_api_key, load_cors_allow_origins
 
 # FetchMode = "local" / "oss" / "both" (D3 决策)
 # Python 端不在 base.py 暴露 enum, 用 Literal + FetchDestination 互斥校验
@@ -287,19 +289,46 @@ async def _lifespan(app: FastAPI):
         t.join(timeout=5.0)
 
 
-app = FastAPI(
-    title="Multimedia Parsing Service",
-    version=__version__,
-    description=(
-        "Universal multimedia resource parsing service — video / image / "
-        "(audio, model) smart URL routing + 3-mode download (local / oss / both) "
-        "with SSE event stream."
-    ),
-    lifespan=_lifespan,
-)
+def create_app() -> FastAPI:
+    """App 工厂 — P1 安全配置在构造时从 env 读取 (12-factor).
+
+    - `API_KEY` env: 设置后所有端点 (除 /health /docs 等免认证路径) 需带
+      `X-API-Key` header; 未设置保持 no-auth (向后兼容)
+    - `CORS_ALLOW_ORIGINS` env: 逗号分隔 origin 白名单; 默认 [] = 跨域全拒
+      (P1 #5 收紧), 显式 `*` 恢复全放行
+    """
+    application = FastAPI(
+        title="Multimedia Parsing Service",
+        version=__version__,
+        description=(
+            "Universal multimedia resource parsing service — video / image / "
+            "(audio, model) smart URL routing + 3-mode download (local / oss / both) "
+            "with SSE event stream."
+        ),
+        lifespan=_lifespan,
+    )
+    # 中间件顺序: 后 add 的在外层先执行 → CORS 最外层 (preflight OPTIONS 不带
+    # X-API-Key, 必须先于 auth 处理), APIKey 内层
+    application.add_middleware(APIKeyMiddleware, api_key=load_api_key())
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=load_cors_allow_origins(),
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
+    application.include_router(router)
+    return application
 
 
-@app.get("/health", response_model=HealthResponse)
+# ---------------------------------------------------------------------------
+# Routes — 挂 APIRouter (由 create_app include, 便于测试构造独立 app 实例)
+# ---------------------------------------------------------------------------
+
+router = APIRouter()
+
+
+@router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(
         version=__version__,
@@ -307,7 +336,7 @@ async def health() -> HealthResponse:
     )
 
 
-@app.post("/parse", response_model=ParseResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/parse", response_model=ParseResponse, status_code=status.HTTP_202_ACCEPTED)
 async def start_parse(req: ParseRequest) -> ParseResponse:
     """启动解析批 — 立即返 batch_id, SSE 流通过 GET /events/{batch_id} 收."""
     batch_id = req.batch_id or f"parse_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
@@ -351,7 +380,7 @@ async def start_parse(req: ParseRequest) -> ParseResponse:
     return ParseResponse(batch_id=batch_id, url_count=len(req.urls))
 
 
-@app.post("/fetch", response_model=FetchResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/fetch", response_model=FetchResponse, status_code=status.HTTP_202_ACCEPTED)
 async def start_fetch(req: FetchRequest) -> FetchResponse:
     """启动下载/上传批 — mode 校验 (D3 互斥)."""
     batch_id = req.batch_id or f"fetch_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
@@ -425,7 +454,7 @@ async def start_fetch(req: FetchRequest) -> FetchResponse:
     return FetchResponse(batch_id=batch_id, item_count=len(req.items))
 
 
-@app.post("/cancel/{batch_id}", response_model=CancelResponse)
+@router.post("/cancel/{batch_id}", response_model=CancelResponse)
 async def cancel_batch(batch_id: str) -> CancelResponse:
     """取消批 — set threading.Event, run_parse / run_fetch 内部检查."""
     cancel_event = _batch_cancel_events.get(batch_id)
@@ -440,7 +469,7 @@ async def cancel_batch(batch_id: str) -> CancelResponse:
     return CancelResponse(batch_id=batch_id, cancelled=True)
 
 
-@app.get("/events/{batch_id}")
+@router.get("/events/{batch_id}")
 async def stream_events(batch_id: str) -> StreamingResponse:
     """SSE 事件流 (text/event-stream). 收 batch_id 走完或 cancel / 出错 → 关闭."""
     q = _batch_queues.get(batch_id)
@@ -471,7 +500,7 @@ async def stream_events(batch_id: str) -> StreamingResponse:
     )
 
 
-@app.get("/batches", response_model=List[BatchStatus])
+@router.get("/batches", response_model=List[BatchStatus])
 async def list_batches() -> List[BatchStatus]:
     """列出已知 batch 状态."""
     return [
@@ -487,6 +516,9 @@ async def list_batches() -> List[BatchStatus]:
 # ---------------------------------------------------------------------------
 # Entry point (供 [project.scripts] console_script)
 # ---------------------------------------------------------------------------
+
+# 模块级 app: 所有路由注册完成后构造 (include_router 快照当时的 routes)
+app = create_app()
 
 
 def main() -> None:
@@ -514,3 +546,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
