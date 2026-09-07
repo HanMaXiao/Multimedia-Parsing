@@ -28,12 +28,14 @@ from urllib.parse import urlparse
 # boto3 顶层 lazy import — 测试无包能 import,runtime 缺包显式 raise。
 try:
     import boto3  # type: ignore[import-untyped]
+    from botocore.config import Config as BotoConfig  # type: ignore[import-untyped]
     from botocore.exceptions import (  # type: ignore[import-untyped]
         BotoCoreError,
         ClientError,
     )
 except ImportError:  # pragma: no cover - 真实环境必有
     boto3 = None  # type: ignore[assignment]
+    BotoConfig = None  # type: ignore[assignment,misc]
     BotoCoreError = Exception  # type: ignore[assignment,misc]
     ClientError = Exception  # type: ignore[assignment,misc]
 
@@ -144,12 +146,20 @@ class OssUploader:
     def _get_client(self) -> Any:
         _require_boto3()
         if self._client is None:
+            # 阿里云 OSS 等不支持 path-style (SecondLevelDomainForbidden),必须
+            # virtual-hosted style;checksum 参数 = botocore 1.36+ 默认行为回退
+            # (旧版本 botocore 的 Config 接受未知 kwargs 并忽略,向下兼容)。
             self._client = boto3.client(  # type: ignore[union-attr]
                 "s3",
                 endpoint_url=self._normalize_endpoint(self.config.endpoint),
                 aws_access_key_id=self.config.access_key_id,
                 aws_secret_access_key=self.config.secret_access_key,
                 region_name=self.config.region,
+                config=BotoConfig(
+                    s3={"addressing_style": "virtual"},
+                    request_checksum_calculation="when_required",
+                    response_checksum_validation="when_required",
+                ),
             )
         return self._client
 
